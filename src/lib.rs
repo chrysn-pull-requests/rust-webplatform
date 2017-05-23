@@ -69,6 +69,11 @@ extern "C" {
     pub fn emscripten_set_main_loop(m: extern fn(), fps: libc::c_int, infinite: libc::c_int);
 }
 
+pub struct WebSocket<'a> {
+    id: libc::c_int,
+    doc: *const Document<'a>,
+}
+
 pub struct HtmlNode<'a> {
     id: libc::c_int,
     doc: *const Document<'a>,
@@ -139,6 +144,24 @@ extern fn rust_caller<F: FnMut(Event)>(a: *const libc::c_void, docptr: *const li
         }
         // target: None,
     });
+}
+
+/* The _v notation introduced here is a generalization based on the
+ * "viii-style" notation of dynCall. Before this is introduced, there's only
+ * refs and rust_caller; both operate on FnMut(Event). The _v versions operate
+ * on FnMut(), and it is expected that there'll be a _v_u8array version
+ * (parting with the original coonventio pretty soon as it turned out not to
+ * fit) next. */
+
+extern fn rust_caller_v<F: FnMut()>(a: *const libc::c_void) {
+    let v:&mut F = unsafe { mem::transmute(a) };
+    v();
+}
+
+extern fn rust_caller_v_u8array<F: FnMut(&[u8])>(a: *const libc::c_void, b: *const libc::c_void) {
+    let v:&mut F = unsafe { mem::transmute(a) };
+    let b:&[u8] = unsafe { (*CStr::from_ptr(b as *const libc::c_char)).to_bytes() };
+    v(b);
 }
 
 impl<'a> HtmlNode<'a> {
@@ -342,9 +365,78 @@ pub fn alert(s: &str) {
 
 pub struct Document<'a> {
     refs: Rc<RefCell<Vec<Box<FnMut(Event<'a>) + 'a>>>>,
+    refs_v: Rc<RefCell<Vec<Box<FnMut() + 'a>>>>,
+    refs_v_u8array: Rc<RefCell<Vec<Box<FnMut(&[u8]) + 'a>>>>,
+}
+
+impl<'a> WebSocket<'a> {
+    /* can and should we make this FnOnce? we'd need to remove the listener,
+     * and should only do that if js guarantees this only gets called once, or
+     * otherwise there might be uses of calling this more than once */
+    pub fn addEventListener_open<F: FnMut() + 'a>(&self, f: F) {
+        unsafe {
+            let b = Box::new(f);
+            let a = &*b as *const _;
+            js! { (self.id, a as *const libc::c_void,
+                rust_caller_v::<F> as *const libc::c_void)
+                b"\
+                WEBPLATFORM.rs_refs[$0].addEventListener('open', function (e) {\
+                    Runtime.dynCall('vi', $2, [$1]);\
+                }, false);\
+            \0" };
+            (&*self.doc).refs_v.borrow_mut().push(b);
+        }
+    }
+
+    pub fn addEventListener_message<F: FnMut(&[u8]) + 'a>(&self, f: F) {
+        unsafe {
+            let b = Box::new(f);
+            let a = &*b as *const _;
+            js! { (self.id, a as *const libc::c_void,
+                rust_caller_v_u8array::<F> as *const libc::c_void)
+                b"\
+                WEBPLATFORM.rs_refs[$0].addEventListener('message', function (e) {\
+                    console.info('received', e);\
+                    Runtime.dynCall('vii', $2, [$1, allocate(intArrayFromString(e.data), 'i8', ALLOC_STACK)]);\
+                }, false);\
+            \0" };
+            (&*self.doc).refs_v_u8array.borrow_mut().push(b);
+        }
+    }
+
+    pub fn send(&self, data: &str) {
+        js! { (self.id, data) b"\
+            WEBPLATFORM.rs_refs[$0].send(UTF8ToString($1));\
+        \0" };
+    }
+
+    pub fn close(&self, data: &str) {
+        js! { (self.id, data) b"\
+            WEBPLATFORM.rs_refs[$0].close();\
+        \0" };
+    }
 }
 
 impl<'a> Document<'a> {
+    pub fn websocket_create<'b>(&'b self, url: &str) -> Option<WebSocket<'a>> {
+        let id = js! { (url) b"\
+            var value = new WebSocket(UTF8ToString($0));\
+            if (!value) {\
+                return -1;\
+            }\
+            return WEBPLATFORM.rs_refs.push(value) - 1;\
+        \0" };
+
+        if id < 0 {
+            None
+        } else {
+            Some(WebSocket {
+                id: id,
+                doc: &*self,
+            })
+        }
+    }
+
     pub fn element_create<'b>(&'b self, s: &str) -> Option<HtmlNode<'a>> {
         let id = js! { (s) b"\
             var value = document.createElement(UTF8ToString($0));\
@@ -500,6 +592,8 @@ pub fn init<'a>() -> Document<'a> {
     \0" };
     Document {
         refs: Rc::new(RefCell::new(Vec::new())),
+        refs_v: Rc::new(RefCell::new(Vec::new())),
+        refs_v_u8array: Rc::new(RefCell::new(Vec::new())),
     }
 }
 
