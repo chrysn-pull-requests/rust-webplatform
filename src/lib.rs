@@ -19,27 +19,63 @@ mod webplatform {
     pub use emscripten_asm_const_int;
 }
 
+#[repr(C)]
+struct ArenaEntryArray {
+    start: libc::c_int,
+    length: libc::c_int,
+}
+
+struct Arena<'a> {
+    cstring: Vec<CString>,
+    u8array: Vec<&'a [u8]>,
+    u8array_parts: Vec<ArenaEntryArray>,
+}
+
+impl<'a> Arena<'a> {
+    fn new() -> Self { Arena {
+        cstring: Vec::new(),
+        u8array: Vec::new(),
+        u8array_parts: Vec::new()
+        } }
+}
+
 trait Interop {
-    fn as_int(self, _:&mut Vec<CString>) -> libc::c_int;
+    fn as_int(self, _:&mut Arena) -> libc::c_int;
 }
 
 impl Interop for i32 {
-    fn as_int(self, _:&mut Vec<CString>) -> libc::c_int {
+    fn as_int(self, _:&mut Arena) -> libc::c_int {
         return self;
     }
 }
 
 impl<'a> Interop for &'a str {
-    fn as_int(self, arena:&mut Vec<CString>) -> libc::c_int {
+    fn as_int(self, arena:&mut Arena) -> libc::c_int {
         let c = CString::new(self).unwrap();
         let ret = c.as_ptr() as libc::c_int;
-        arena.push(c);
+        arena.cstring.push(c);
         return ret;
     }
 }
 
+impl<'a> Interop for &'a [u8] {
+    fn as_int(self, arena:&mut Arena) -> libc::c_int {
+        let parts = ArenaEntryArray { start: self.as_ptr() as libc::c_int, length: self.len() as libc::c_int };
+        let partsptr: *const ArenaEntryArray = &parts;
+
+        arena.u8array_parts.push(parts);
+        // BIG FIXME: This is trusting that there is another reference to self
+        // around somewhere that outlives the arena. What else could we do --
+        // require arguments to be owned? To be boxed/RC'd? Use another arena
+        // mechanism that doesn't require storing in a vec?
+//         arena.u8array.push(&self);
+
+        partsptr as libc::c_int
+    }
+}
+
 impl<'a> Interop for *const libc::c_void {
-    fn as_int(self, _:&mut Vec<CString>) -> libc::c_int {
+    fn as_int(self, _:&mut Arena) -> libc::c_int {
         return self as libc::c_int;
     }
 }
@@ -48,7 +84,7 @@ impl<'a> Interop for *const libc::c_void {
 macro_rules! js {
     ( ($( $x:expr ),*) $y:expr ) => {
         {
-            let mut arena:Vec<CString> = Vec::new();
+            let mut arena = Arena::new();
             const LOCAL: &'static [u8] = $y;
             unsafe { ::webplatform::emscripten_asm_const_int(&LOCAL[0] as *const _ as *const libc::c_char, $(Interop::as_int($x, &mut arena)),*) }
         }
@@ -407,6 +443,17 @@ impl<'a> WebSocket<'a> {
     pub fn send(&self, data: &str) {
         js! { (self.id, data) b"\
             WEBPLATFORM.rs_refs[$0].send(UTF8ToString($1));\
+        \0" };
+    }
+
+    pub fn send_binary(&self, data: &[u8]) {
+        /* FIXME first three lines should go into a U8ToSlice function like UTF8ToString */
+        js! { (self.id, data) b"\
+            var start = HEAPU32[$1 / 4];\
+            var length = HEAPU32[$1 / 4 + 1];\
+            var sliced = HEAP8.slice(start, start + length * 1);\
+            console.info('data is', $1, start, length, sliced);\
+            WEBPLATFORM.rs_refs[$0].send(sliced);\
         \0" };
     }
 
