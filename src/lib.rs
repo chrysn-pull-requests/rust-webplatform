@@ -440,7 +440,6 @@ impl<'a> WebSocket<'a> {
                 b"\
                 WEBPLATFORM.rs_refs[$0].addEventListener('message', function (e) {\
                     if (typeof e.data != 'string') return;\
-                    console.info('received string', e);\
                     Runtime.dynCall('vii', $2, [$1, allocate(intArrayFromString(e.data), 'i8', ALLOC_STACK)]);\
                 }, false);\
             \0" };
@@ -458,7 +457,6 @@ impl<'a> WebSocket<'a> {
                 b"\
                 WEBPLATFORM.rs_refs[$0].addEventListener('message', function (e) {\
                     if (typeof e.data != 'object') return;\
-                    console.info('received binary', e);\
                     var buf = Module._malloc(e.data.byteLength);\
                     Module.writeArrayToMemory(new Int8Array(e.data), buf);\
                     Runtime.dynCall('viii', $2, [$1, buf, e.data.byteLength]);\
@@ -480,7 +478,6 @@ impl<'a> WebSocket<'a> {
             var start = HEAPU32[$1 / 4];\
             var length = HEAPU32[$1 / 4 + 1];\
             var sliced = HEAP8.slice(start, start + length * 1);\
-            console.info('data is', $1, start, length, sliced);\
             WEBPLATFORM.rs_refs[$0].send(sliced);\
         \0" };
     }
