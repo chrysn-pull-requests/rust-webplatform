@@ -194,9 +194,15 @@ extern fn rust_caller_v<F: FnMut()>(a: *const libc::c_void) {
     v();
 }
 
-extern fn rust_caller_v_u8array<F: FnMut(&[u8])>(a: *const libc::c_void, b: *const libc::c_void) {
+extern fn rust_caller_v_string<F: FnMut(String)>(a: *const libc::c_void, b: *const libc::c_char) {
     let v:&mut F = unsafe { mem::transmute(a) };
-    let b:&[u8] = unsafe { (*CStr::from_ptr(b as *const libc::c_char)).to_bytes() };
+    let b = unsafe { str::from_utf8(CStr::from_ptr(b).to_bytes()).unwrap().to_owned() };
+    v(b);
+}
+
+extern fn rust_caller_v_u8array<F: FnMut(&[u8])>(a: *const libc::c_void, start: *const libc::c_void, length: libc::c_int) {
+    let v:&mut F = unsafe { mem::transmute(a) };
+    let b:&[u8] = unsafe { std::slice::from_raw_parts(start as *const u8, length as usize) };
     v(b);
 }
 
@@ -403,6 +409,7 @@ pub struct Document<'a> {
     refs: Rc<RefCell<Vec<Box<FnMut(Event<'a>) + 'a>>>>,
     refs_v: Rc<RefCell<Vec<Box<FnMut() + 'a>>>>,
     refs_v_u8array: Rc<RefCell<Vec<Box<FnMut(&[u8]) + 'a>>>>,
+    refs_v_string: Rc<RefCell<Vec<Box<FnMut(String) + 'a>>>>,
 }
 
 impl<'a> WebSocket<'a> {
@@ -424,16 +431,37 @@ impl<'a> WebSocket<'a> {
         }
     }
 
-    pub fn addEventListener_message<F: FnMut(&[u8]) + 'a>(&self, f: F) {
+    pub fn addEventListener_message_string<F: FnMut(String) + 'a>(&self, f: F) {
         unsafe {
             let b = Box::new(f);
             let a = &*b as *const _;
             js! { (self.id, a as *const libc::c_void,
+                rust_caller_v_string::<F> as *const libc::c_void)
+                b"\
+                WEBPLATFORM.rs_refs[$0].addEventListener('message', function (e) {\
+                    if (typeof e.data != 'string') return;\
+                    console.info('received string', e);\
+                    Runtime.dynCall('vii', $2, [$1, allocate(intArrayFromString(e.data), 'i8', ALLOC_STACK)]);\
+                }, false);\
+            \0" };
+            (&*self.doc).refs_v_string.borrow_mut().push(b);
+        }
+    }
+
+    pub fn addEventListener_message_binary<F: FnMut(&[u8]) + 'a>(&self, f: F) {
+        unsafe {
+            let b = Box::new(f);
+            let a = &*b as *const _;
+            // BIG FIXME this leaks memory, and i don't want to malloc there in the first place but just pass a pointer to the buffer
+            js! { (self.id, a as *const libc::c_void,
                 rust_caller_v_u8array::<F> as *const libc::c_void)
                 b"\
                 WEBPLATFORM.rs_refs[$0].addEventListener('message', function (e) {\
-                    console.info('received', e);\
-                    Runtime.dynCall('vii', $2, [$1, allocate(intArrayFromString(e.data), 'i8', ALLOC_STACK)]);\
+                    if (typeof e.data != 'object') return;\
+                    console.info('received binary', e);\
+                    var buf = Module._malloc(e.data.byteLength);\
+                    Module.writeArrayToMemory(new Int8Array(e.data), buf);\
+                    Runtime.dynCall('viii', $2, [$1, buf, e.data.byteLength]);\
                 }, false);\
             \0" };
             (&*self.doc).refs_v_u8array.borrow_mut().push(b);
@@ -471,6 +499,7 @@ impl<'a> Document<'a> {
             if (!value) {\
                 return -1;\
             }\
+            value.binaryType = 'arraybuffer';\
             return WEBPLATFORM.rs_refs.push(value) - 1;\
         \0" };
 
@@ -641,6 +670,7 @@ pub fn init<'a>() -> Document<'a> {
         refs: Rc::new(RefCell::new(Vec::new())),
         refs_v: Rc::new(RefCell::new(Vec::new())),
         refs_v_u8array: Rc::new(RefCell::new(Vec::new())),
+        refs_v_string: Rc::new(RefCell::new(Vec::new())),
     }
 }
 
